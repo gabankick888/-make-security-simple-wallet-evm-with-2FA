@@ -1,0 +1,164 @@
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+contract SecureWallet {
+
+    address public owner;
+    address public guardian;
+
+    bool public frozen;
+
+    uint256 public transactionDelay = 5 minutes;
+
+    struct Transaction {
+        address to;
+        uint256 value;
+        bytes data;
+        uint256 executeAfter;
+        bool ownerApproved;
+        bool guardianApproved;
+        bool executed;
+    }
+
+    uint256 public transactionCount;
+
+    mapping(uint256 => Transaction) public transactions;
+
+    event TransactionCreated(uint256 indexed id);
+    event TransactionApproved(uint256 indexed id);
+    event TransactionExecuted(uint256 indexed id);
+    event WalletFrozen(bool status);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    modifier onlyGuardian() {
+        require(msg.sender == guardian, "Not guardian");
+        _;
+    }
+
+    constructor(address _guardian) {
+        require(_guardian != address(0), "Invalid guardian");
+        require(_guardian != msg.sender, "Guardian cannot be owner");
+
+        owner = msg.sender;
+        guardian = _guardian;
+    }
+
+    // Deposit ETH
+    receive() external payable {}
+
+    // Create transaction
+    function createTransaction(
+        address _to,
+        uint256 _value,
+        bytes calldata _data
+    ) external onlyOwner {
+        require(!frozen, "Wallet frozen");
+        require(_to != address(0), "Invalid recipient");
+
+        uint256 id = transactionCount++;
+
+        transactions[id] = Transaction({
+            to: _to,
+            value: _value,
+            data: _data,
+            executeAfter: block.timestamp + transactionDelay,
+            ownerApproved: true,
+            guardianApproved: false,
+            executed: false
+        });
+
+        emit TransactionCreated(id);
+    }
+
+    // Second factor: Guardian approval
+    function approveTransaction(uint256 id)
+        external
+        onlyGuardian
+    {
+        require(!frozen, "Wallet frozen");
+
+        Transaction storage txn = transactions[id];
+
+        require(txn.ownerApproved, "Owner not approved");
+        require(!txn.executed, "Already executed");
+        require(!txn.guardianApproved, "Already approved");
+
+        txn.guardianApproved = true;
+
+        emit TransactionApproved(id);
+    }
+
+    // Execute transaction
+    function executeTransaction(uint256 id)
+        external
+        onlyOwner
+    {
+        require(!frozen, "Wallet frozen");
+
+        Transaction storage txn = transactions[id];
+
+        require(txn.ownerApproved, "Owner approval missing");
+        require(txn.guardianApproved, "2FA required");
+        require(!txn.executed, "Already executed");
+        require(
+            block.timestamp >= txn.executeAfter,
+            "Time delay active"
+        );
+
+        txn.executed = true;
+
+        (bool success, ) = txn.to.call{
+            value: txn.value
+        }(txn.data);
+
+        require(success, "Transaction failed");
+
+        emit TransactionExecuted(id);
+    }
+
+    // Emergency freeze
+    function freezeWallet() external onlyGuardian {
+        frozen = true;
+        emit WalletFrozen(true);
+    }
+
+    // Unfreeze requires both owner and guardian
+    function unfreezeWallet(bool guardianConfirmation)
+        external
+        onlyOwner
+    {
+        require(guardianConfirmation, "Guardian confirmation required");
+        require(frozen, "Wallet not frozen");
+
+        frozen = false;
+        emit WalletFrozen(false);
+    }
+
+    // Change guardian
+    function changeGuardian(address newGuardian)
+        external
+        onlyOwner
+    {
+        require(newGuardian != address(0), "Invalid guardian");
+        require(newGuardian != owner, "Cannot be owner");
+
+        guardian = newGuardian;
+    }
+
+    function setTransactionDelay(uint256 delayTime)
+        external
+        onlyOwner
+    {
+        require(delayTime <= 1 days, "Delay too long");
+        transactionDelay = delayTime;
+    }
+
+    function getBalance() external view returns (uint256) {
+        return address(this).balance;
+    }
+}
